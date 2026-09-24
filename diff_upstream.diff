@@ -232,7 +232,7 @@ index 0000000..0061951
 +echo "Script execution completed."
 +
 diff --git a/dwmblocks.c b/dwmblocks.c
-index c8f77b7..146b2de 100644
+index c8f77b7..9c39a97 100644
 --- a/dwmblocks.c
 +++ b/dwmblocks.c
 @@ -1,8 +1,13 @@
@@ -311,7 +311,7 @@ index c8f77b7..146b2de 100644
  #endif
  
  
-@@ -52,45 +70,169 @@ static void (*writestatus) () = pstdout;
+@@ -52,45 +70,170 @@ static void (*writestatus) () = pstdout;
  
  static char statusbar[LENGTH(blocks)][CMDLENGTH] = {0};
  static char statusstr[2][STATUSLENGTH];
@@ -336,8 +336,9 @@ index c8f77b7..146b2de 100644
 +{
 +	char tempstatus[CMDLENGTH] = {0};
 +	int start = 0;
-+	//mark the block with its signal so dwm can tell which block was clicked
-+	if (block->signal)
++	//mark the block with its signal so dwm can tell which block was clicked,
++	//not when printing to stdout (-p) where the raw bytes would end up in the output
++	if (block->signal && writestatus != pstdout)
 +		tempstatus[start++] = block->signal;
 +	strcpy(tempstatus+start, block->icon);
 +	int i = strlen(tempstatus);
@@ -499,7 +500,7 @@ index c8f77b7..146b2de 100644
  void getsigcmds(unsigned int signal)
  {
  	const Block *current;
-@@ -101,17 +243,29 @@ void getsigcmds(unsigned int signal)
+@@ -101,17 +244,29 @@ void getsigcmds(unsigned int signal)
  	}
  }
  
@@ -531,7 +532,7 @@ index c8f77b7..146b2de 100644
  	}
  
  }
-@@ -122,12 +276,13 @@ int getstatus(char *str, char *last)
+@@ -122,12 +277,13 @@ int getstatus(char *str, char *last)
  	str[0] = '\0';
  	for (unsigned int i = 0; i < LENGTH(blocks); i++)
  		strcat(str, statusbar[i]);
@@ -547,7 +548,7 @@ index c8f77b7..146b2de 100644
  {
  	if (!getstatus(statusstr[0], statusstr[1]))//Only set root if text has changed.
  		return;
-@@ -135,7 +290,7 @@ void setroot()
+@@ -135,7 +291,7 @@ void setroot()
  	XFlush(dpy);
  }
  
@@ -556,7 +557,7 @@ index c8f77b7..146b2de 100644
  {
  	dpy = XOpenDisplay(NULL);
  	if (!dpy) {
-@@ -148,7 +303,7 @@ int setupX()
+@@ -148,7 +304,7 @@ int setupX()
  }
  #endif
  
@@ -565,7 +566,7 @@ index c8f77b7..146b2de 100644
  {
  	if (!getstatus(statusstr[0], statusstr[1]))//Only write out if text has changed.
  		return;
-@@ -157,17 +312,66 @@ void pstdout()
+@@ -157,17 +313,68 @@ void pstdout()
  }
  
  
@@ -620,6 +621,8 @@ index c8f77b7..146b2de 100644
 +			continue;
 +		if (pfds[0].revents) {
 +			while (read(sigpipe[0], &ev, sizeof(ev)) == sizeof(ev)) {
++				if (!ev.signal)
++					continue;//wakeup from termhandler
 +				if (ev.button) {
 +					for (unsigned int j = 0; j < LENGTH(blocks); j++)
 +						if (blocks[j].signal == ev.signal)
@@ -640,7 +643,7 @@ index c8f77b7..146b2de 100644
  	}
  }
  
-@@ -179,22 +383,26 @@ void dummysighandler(int signum)
+@@ -179,22 +386,31 @@ void dummysighandler(int signum)
  }
  #endif
  
@@ -660,7 +663,12 @@ index c8f77b7..146b2de 100644
 -void termhandler()
 +void termhandler(int signum)
  {
++	//also wake up statusloop, in case the signal came just before it started waiting
++	int olderrno = errno;
++	SigEvent ev = { 0, 0 };
  	statusContinue = 0;
++	write(sigpipe[1], &ev, sizeof(ev));
++	errno = olderrno;
  }
  
  int main(int argc, char** argv)
@@ -674,7 +682,7 @@ index c8f77b7..146b2de 100644
  		else if (!strcmp("-p",argv[i]))
  			writestatus = pstdout;
  	}
-@@ -202,10 +410,11 @@ int main(int argc, char** argv)
+@@ -202,8 +418,9 @@ int main(int argc, char** argv)
  	if (!setupX())
  		return 1;
  #endif
@@ -682,9 +690,7 @@ index c8f77b7..146b2de 100644
 -	delim[delimLen++] = '\0';
 +	delimLen = MIN(delimLen, strlen(delimiter));
 +	delimiter[delimLen++] = '\0';
++	setupsignals();
  	signal(SIGTERM, termhandler);
  	signal(SIGINT, termhandler);
-+	setupsignals();
  	statusloop();
- #ifndef NO_X
- 	XCloseDisplay(dpy);
