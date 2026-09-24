@@ -63,6 +63,7 @@ static char statusbar[LENGTH(blocks)][CMDLENGTH] = {0};
 static char statusstr[2][STATUSLENGTH];
 static volatile sig_atomic_t statusContinue = 1;
 static int sigpipe[2];
+static char *delimiter = delim;//delim from blocks.h, or the -d argument
 
 //opens process *cmd and stores output in *output
 void getcmd(const Block *block, char *output)
@@ -86,8 +87,8 @@ void getcmd(const Block *block, char *output)
 	//leave the block out if block and command output are both empty
 	if (i == start)
 		tempstatus[0] = '\0';
-	else if (delim[0] != '\0')
-		strncpy(tempstatus+i, delim, delimLen);
+	else if (delimiter[0] != '\0')
+		strncpy(tempstatus+i, delimiter, delimLen);
 	strcpy(output, tempstatus);
 	pclose(cmdf);
 }
@@ -174,8 +175,8 @@ int getstatus(char *str, char *last)
 	str[0] = '\0';
 	for (unsigned int i = 0; i < LENGTH(blocks); i++)
 		strcat(str, statusbar[i]);
-	if (strlen(str) >= strlen(delim))
-		str[strlen(str)-strlen(delim)] = '\0';
+	if (strlen(str) >= strlen(delimiter))
+		str[strlen(str)-strlen(delimiter)] = '\0';
 	return strcmp(str, last);//0 if they are the same
 }
 
@@ -269,9 +270,9 @@ void termhandler(int signum)
 
 int main(int argc, char** argv)
 {
-	for (int i = 0; i < argc; i++) {//Handle command line arguments
-		if (!strcmp("-d",argv[i]))
-			strncpy(delim, argv[++i], delimLen);
+	for (int i = 1; i < argc; i++) {//Handle command line arguments
+		if (!strcmp("-d",argv[i]) && i+1 < argc)
+			delimiter = argv[++i];
 		else if (!strcmp("-p",argv[i]))
 			writestatus = pstdout;
 	}
@@ -279,8 +280,8 @@ int main(int argc, char** argv)
 	if (!setupX())
 		return 1;
 #endif
-	delimLen = MIN(delimLen, strlen(delim));
-	delim[delimLen++] = '\0';
+	delimLen = MIN(delimLen, strlen(delimiter));
+	delimiter[delimLen++] = '\0';
 	signal(SIGTERM, termhandler);
 	signal(SIGINT, termhandler);
 	setupsignals();
