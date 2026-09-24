@@ -132,6 +132,21 @@ index 0000000..31cb691
 +conflicts (and how they were resolved), or was stopped for a question. Include the build result
 +and the fork commits created. If stopped on a question, name the commit it is waiting on so the
 +next run starts there.
+diff --git a/Makefile b/Makefile
+index 75109ac..02d2170 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,6 +1,9 @@
+ PREFIX  := /usr/local
+ CC      := cc
+-CFLAGS  := -pedantic -Wall -Wno-deprecated-declarations -Os
++# 1 runs the block commands in parallel, 0 one at a time (like upstream).
++# Toggle with `make clean && make ASYNC=0`, or change it here.
++ASYNC   := 1
++CFLAGS  := -pedantic -Wall -Wno-deprecated-declarations -Os -DASYNC=${ASYNC}
+ LDFLAGS := -lX11
+ 
+ # FreeBSD (uncomment)
 diff --git a/blocks.def.h b/blocks.def.h
 index dbb3305..f6561a0 100644
 --- a/blocks.def.h
@@ -217,7 +232,7 @@ index 0000000..0061951
 +echo "Script execution completed."
 +
 diff --git a/dwmblocks.c b/dwmblocks.c
-index c8f77b7..17c87dd 100644
+index c8f77b7..146b2de 100644
 --- a/dwmblocks.c
 +++ b/dwmblocks.c
 @@ -1,8 +1,13 @@
@@ -234,7 +249,7 @@ index c8f77b7..17c87dd 100644
  #ifndef NO_X
  #include<X11/Xlib.h>
  #endif
-@@ -14,7 +19,7 @@
+@@ -14,9 +19,16 @@
  #define SIGMINUS		SIGRTMIN
  #endif
  #define LENGTH(X)               (sizeof(X) / sizeof (X[0]))
@@ -242,8 +257,17 @@ index c8f77b7..17c87dd 100644
 +#define CMDLENGTH		100
  #define MIN( a, b ) ( ( a < b) ? a : b )
  #define STATUSLENGTH (LENGTH(blocks) * CMDLENGTH + 1)
++//ASYNC 1 runs the block commands in parallel, so a slow command (e.g. one
++//waiting on the network) can't hold up the other blocks, signals and clicks.
++//ASYNC 0 runs them one at a time like upstream dwmblocks. To turn it off,
++//build with `make clean && make ASYNC=0`, or set ASYNC in the Makefile.
++#ifndef ASYNC
++#define ASYNC 1
++#endif
  
-@@ -24,27 +29,31 @@ typedef struct {
+ typedef struct {
+ 	char* icon;
+@@ -24,27 +36,33 @@ typedef struct {
  	unsigned int interval;
  	unsigned int signal;
  } Block;
@@ -257,6 +281,8 @@ index c8f77b7..17c87dd 100644
 -void sighandler(int num);
 +void sighandler(int signum, siginfo_t *si, void *ucontext);
 +void buttonhandler(const Block *block, int button);
++void getcmd(const Block *block, char *output);
++void setblockstatus(const Block *block, char *output, const char *cmdout);
  void getcmds(int time);
  void getsigcmds(unsigned int signal);
 -void setupsignals();
@@ -285,7 +311,7 @@ index c8f77b7..17c87dd 100644
  #endif
  
  
-@@ -52,31 +61,44 @@ static void (*writestatus) () = pstdout;
+@@ -52,45 +70,169 @@ static void (*writestatus) () = pstdout;
  
  static char statusbar[LENGTH(blocks)][CMDLENGTH] = {0};
  static char statusstr[2][STATUSLENGTH];
@@ -294,37 +320,30 @@ index c8f77b7..17c87dd 100644
 +static volatile sig_atomic_t statusContinue = 1;
 +static int sigpipe[2];
 +static char *delimiter = delim;//delim from blocks.h, or the -d argument
++#if ASYNC
++typedef struct {
++	int fd;//read end of the running command's output, -1 if not running
++	int rerun;//the block was signalled again while its command was running
++	size_t len;
++	char out[CMDLENGTH];
++} BlockCmd;
++static BlockCmd blockcmds[LENGTH(blocks)];
++void readcmd(unsigned int i);
++#endif
  
- //opens process *cmd and stores output in *output
- void getcmd(const Block *block, char *output)
- {
- 	//make sure status is same until output is ready
- 	char tempstatus[CMDLENGTH] = {0};
--	strcpy(tempstatus, block->icon);
++//builds the status of a block from the output of its command
++void setblockstatus(const Block *block, char *output, const char *cmdout)
++{
++	char tempstatus[CMDLENGTH] = {0};
 +	int start = 0;
 +	//mark the block with its signal so dwm can tell which block was clicked
 +	if (block->signal)
 +		tempstatus[start++] = block->signal;
 +	strcpy(tempstatus+start, block->icon);
- 	FILE *cmdf = popen(block->command, "r");
- 	if (!cmdf)
- 		return;
--	int i = strlen(block->icon);
 +	int i = strlen(tempstatus);
- 	fgets(tempstatus+i, CMDLENGTH-i-delimLen, cmdf);
- 	i = strlen(tempstatus);
--	//if block and command output are both not empty
--	if (i != 0) {
--		//only chop off newline if one is present at the end
--		i = tempstatus[i-1] == '\n' ? i-1 : i;
--		if (delim[0] != '\0') {
--			strncpy(tempstatus+i, delim, delimLen);
--		}
--		else
--			tempstatus[i++] = '\0';
-+	//only chop off newline if one is present at the end
-+	if (i != 0 && tempstatus[i-1] == '\n')
-+		tempstatus[--i] = '\0';
++	//only use the first line of the output, as much of it as fits
++	while (*cmdout && *cmdout != '\n' && i < CMDLENGTH-(int)delimLen-1)
++		tempstatus[i++] = *cmdout++;
 +	//drop a UTF-8 character that was cut in half because the output was too long
 +	int j = i;
 +	while (j > start && ((unsigned char)tempstatus[j-1] & 0xC0) == 0x80)
@@ -334,16 +353,117 @@ index c8f77b7..17c87dd 100644
 +		int charlen = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
 +		if (i-(j-1) < charlen)
 +			tempstatus[i = j-1] = '\0';
- 	}
++	}
 +	//leave the block out if block and command output are both empty
 +	if (i == start)
 +		tempstatus[0] = '\0';
 +	else if (delimiter[0] != '\0')
 +		strncpy(tempstatus+i, delimiter, delimLen);
- 	strcpy(output, tempstatus);
++	strcpy(output, tempstatus);
++}
++
++#if ASYNC
++//starts the command of a block in the background, readcmd updates the block
++//once the command is done
++void getcmd(const Block *block, char *output)
++{
++	BlockCmd *cmd = &blockcmds[block - blocks];
++	int fds[2];
++	pid_t pid;
++
++	if (cmd->fd != -1) {
++		cmd->rerun = 1;
++		return;
++	}
++	if (pipe(fds) == -1)
++		return;
++	pid = fork();
++	if (pid == -1) {
++		close(fds[0]);
++		close(fds[1]);
++		return;
++	}
++	if (pid == 0) {
++		dup2(fds[1], STDOUT_FILENO);
++		close(fds[0]);
++		close(fds[1]);
++		execl("/bin/sh", "sh", "-c", block->command, (char *)NULL);
++		_exit(127);
++	}
++	close(fds[1]);
++	fcntl(fds[0], F_SETFD, FD_CLOEXEC);
++	fcntl(fds[0], F_SETFL, O_NONBLOCK);
++	cmd->fd = fds[0];
++	cmd->rerun = 0;
++	cmd->len = 0;
++}
++
++//reads the output of the running command of block i and updates the block
++//when the command is done
++void readcmd(unsigned int i)
++{
++	BlockCmd *cmd = &blockcmds[i];
++	char buf[256];
++	ssize_t n;
++
++	//keep what fits, the rest is only read so the command can't block on a full pipe
++	while ((n = read(cmd->fd, buf, sizeof(buf))) > 0) {
++		size_t keep = MIN((size_t)n, sizeof(cmd->out)-1-cmd->len);
++		memcpy(cmd->out+cmd->len, buf, keep);
++		cmd->len += keep;
++	}
++	if (n == -1 && (errno == EAGAIN || errno == EINTR))
++		return;
++	close(cmd->fd);
++	cmd->fd = -1;
++	cmd->out[cmd->len] = '\0';
++	setblockstatus(blocks+i, statusbar[i], cmd->out);
++	if (cmd->rerun)
++		getcmd(blocks+i, statusbar[i]);
++}
++#else
+ //opens process *cmd and stores output in *output
+ void getcmd(const Block *block, char *output)
+ {
+ 	//make sure status is same until output is ready
+-	char tempstatus[CMDLENGTH] = {0};
+-	strcpy(tempstatus, block->icon);
++	char cmdout[CMDLENGTH] = {0};
+ 	FILE *cmdf = popen(block->command, "r");
+ 	if (!cmdf)
+ 		return;
+-	int i = strlen(block->icon);
+-	fgets(tempstatus+i, CMDLENGTH-i-delimLen, cmdf);
+-	i = strlen(tempstatus);
+-	//if block and command output are both not empty
+-	if (i != 0) {
+-		//only chop off newline if one is present at the end
+-		i = tempstatus[i-1] == '\n' ? i-1 : i;
+-		if (delim[0] != '\0') {
+-			strncpy(tempstatus+i, delim, delimLen);
+-		}
+-		else
+-			tempstatus[i++] = '\0';
+-	}
+-	strcpy(output, tempstatus);
++	fgets(cmdout, sizeof(cmdout), cmdf);
  	pclose(cmdf);
++	setblockstatus(block, output, cmdout);
  }
-@@ -91,6 +113,35 @@ void getcmds(int time)
++#endif
+ 
+ void getcmds(int time)
+ {
+ 	const Block* current;
+ 	for (unsigned int i = 0; i < LENGTH(blocks); i++) {
+ 		current = blocks + i;
++#if ASYNC
++		//let a command that takes longer than its interval finish first
++		if (blockcmds[i].fd != -1)
++			continue;
++#endif
+ 		if ((current->interval != 0 && time % current->interval == 0) || time == -1)
+ 			getcmd(current,statusbar[i]);
  	}
  }
  
@@ -379,7 +499,7 @@ index c8f77b7..17c87dd 100644
  void getsigcmds(unsigned int signal)
  {
  	const Block *current;
-@@ -101,17 +152,29 @@ void getsigcmds(unsigned int signal)
+@@ -101,17 +243,29 @@ void getsigcmds(unsigned int signal)
  	}
  }
  
@@ -411,7 +531,7 @@ index c8f77b7..17c87dd 100644
  	}
  
  }
-@@ -122,12 +185,13 @@ int getstatus(char *str, char *last)
+@@ -122,12 +276,13 @@ int getstatus(char *str, char *last)
  	str[0] = '\0';
  	for (unsigned int i = 0; i < LENGTH(blocks); i++)
  		strcat(str, statusbar[i]);
@@ -427,7 +547,7 @@ index c8f77b7..17c87dd 100644
  {
  	if (!getstatus(statusstr[0], statusstr[1]))//Only set root if text has changed.
  		return;
-@@ -135,7 +199,7 @@ void setroot()
+@@ -135,7 +290,7 @@ void setroot()
  	XFlush(dpy);
  }
  
@@ -436,7 +556,7 @@ index c8f77b7..17c87dd 100644
  {
  	dpy = XOpenDisplay(NULL);
  	if (!dpy) {
-@@ -148,7 +212,7 @@ int setupX()
+@@ -148,7 +303,7 @@ int setupX()
  }
  #endif
  
@@ -445,7 +565,7 @@ index c8f77b7..17c87dd 100644
  {
  	if (!getstatus(statusstr[0], statusstr[1]))//Only write out if text has changed.
  		return;
-@@ -157,17 +221,37 @@ void pstdout()
+@@ -157,17 +312,66 @@ void pstdout()
  }
  
  
@@ -454,10 +574,17 @@ index c8f77b7..17c87dd 100644
  {
 -	setupsignals();
 -	int i = 0;
-+	struct pollfd pfd = { .fd = sigpipe[0], .events = POLLIN };
++	//the signal pipe, plus the output of every running command in async mode
++	struct pollfd pfds[LENGTH(blocks)+1] = { { .fd = sigpipe[0], .events = POLLIN } };
 +	struct timespec now, next;
-+	int i = 0, timeout;
++	int i = 0, nfds, timeout;
 +	SigEvent ev;
++#if ASYNC
++	unsigned int running[LENGTH(blocks)+1];
++
++	for (unsigned int j = 0; j < LENGTH(blocks); j++)
++		blockcmds[j].fd = -1;
++#endif
 +
  	getcmds(-1);
 -	while (1) {
@@ -466,10 +593,32 @@ index c8f77b7..17c87dd 100644
 +	clock_gettime(CLOCK_MONOTONIC, &next);
 +	next.tv_sec++;
 +	while (statusContinue) {
-+		//wait until the next second, handling signals as they come in
++#if ASYNC
++		//reap finished commands
++		while (waitpid(-1, NULL, WNOHANG) > 0);
++#endif
 +		clock_gettime(CLOCK_MONOTONIC, &now);
 +		timeout = (next.tv_sec - now.tv_sec) * 1000 + (next.tv_nsec - now.tv_nsec) / 1000000;
-+		if (timeout > 0 && poll(&pfd, 1, timeout) != 0) {
++		if (timeout <= 0) {
++			getcmds(++i);
++			writestatus();
++			clock_gettime(CLOCK_MONOTONIC, &next);
++			next.tv_sec++;
++			continue;
++		}
++		//wait until the next second, handling signals and output as they come in
++		nfds = 1;
++#if ASYNC
++		for (unsigned int j = 0; j < LENGTH(blocks); j++) {
++			if (blockcmds[j].fd != -1) {
++				pfds[nfds] = (struct pollfd){ .fd = blockcmds[j].fd, .events = POLLIN };
++				running[nfds++] = j;
++			}
++		}
++#endif
++		if (poll(pfds, nfds, timeout) <= 0)
++			continue;
++		if (pfds[0].revents) {
 +			while (read(sigpipe[0], &ev, sizeof(ev)) == sizeof(ev)) {
 +				if (ev.button) {
 +					for (unsigned int j = 0; j < LENGTH(blocks); j++)
@@ -478,20 +627,20 @@ index c8f77b7..17c87dd 100644
 +				} else
 +					getsigcmds(ev.signal);
 +			}
-+			writestatus();
-+			continue;
 +		}
-+		getcmds(++i);
++#if ASYNC
++		for (int j = 1; j < nfds; j++)
++			if (pfds[j].revents)
++				readcmd(running[j]);
++#endif
  		writestatus();
 -		if (!statusContinue)
 -			break;
 -		sleep(1.0);
-+		clock_gettime(CLOCK_MONOTONIC, &next);
-+		next.tv_sec++;
  	}
  }
  
-@@ -179,22 +263,26 @@ void dummysighandler(int signum)
+@@ -179,22 +383,26 @@ void dummysighandler(int signum)
  }
  #endif
  
@@ -525,7 +674,7 @@ index c8f77b7..17c87dd 100644
  		else if (!strcmp("-p",argv[i]))
  			writestatus = pstdout;
  	}
-@@ -202,10 +290,11 @@ int main(int argc, char** argv)
+@@ -202,10 +410,11 @@ int main(int argc, char** argv)
  	if (!setupX())
  		return 1;
  #endif
