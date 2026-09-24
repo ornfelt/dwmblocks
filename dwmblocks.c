@@ -6,6 +6,7 @@
 #include<string.h>
 #include<unistd.h>
 #include<signal.h>
+#include<sys/wait.h>
 #include<time.h>
 #ifndef NO_X
 #include<X11/Xlib.h>
@@ -28,10 +29,15 @@ typedef struct {
 	unsigned int interval;
 	unsigned int signal;
 } Block;
+typedef struct {
+	unsigned int signal;
+	int button;
+} SigEvent;
 #ifndef __OpenBSD__
 void dummysighandler(int num);
 #endif
-void sighandler(int num);
+void sighandler(int signum, siginfo_t *si, void *ucontext);
+void buttonhandler(const Block *block, int button);
 void getcmds(int time);
 void getsigcmds(unsigned int signal);
 void setupsignals(void);
@@ -63,18 +69,24 @@ void getcmd(const Block *block, char *output)
 {
 	//make sure status is same until output is ready
 	char tempstatus[CMDLENGTH] = {0};
-	strcpy(tempstatus, block->icon);
+	int start = 0;
+	//mark the block with its signal so dwm can tell which block was clicked
+	if (block->signal)
+		tempstatus[start++] = block->signal;
+	strcpy(tempstatus+start, block->icon);
 	FILE *cmdf = popen(block->command, "r");
 	if (!cmdf)
 		return;
-	int i = strlen(block->icon);
+	int i = strlen(tempstatus);
 	fgets(tempstatus+i, CMDLENGTH-i-delimLen, cmdf);
 	i = strlen(tempstatus);
 	//only chop off newline if one is present at the end
 	if (i != 0 && tempstatus[i-1] == '\n')
 		tempstatus[--i] = '\0';
-	//if block and command output are both not empty
-	if (i != 0 && delim[0] != '\0')
+	//leave the block out if block and command output are both empty
+	if (i == start)
+		tempstatus[0] = '\0';
+	else if (delim[0] != '\0')
 		strncpy(tempstatus+i, delim, delimLen);
 	strcpy(output, tempstatus);
 	pclose(cmdf);
@@ -88,6 +100,35 @@ void getcmds(int time)
 		if ((current->interval != 0 && time % current->interval == 0) || time == -1)
 			getcmd(current,statusbar[i]);
 	}
+}
+
+//runs the command of a clicked block in the background with BLOCK_BUTTON set,
+//then signals dwmblocks to update the block from the command's normal output
+void buttonhandler(const Block *block, int button)
+{
+	char shcmd[1024], btn[12];
+	pid_t child;
+
+	snprintf(btn, sizeof(btn), "%d", button);
+	if (snprintf(shcmd, sizeof(shcmd), "%s\nkill -%d %d", block->command,
+	             SIGMINUS+block->signal, (int)getpid()) >= (int)sizeof(shcmd))
+		return;
+	//fork twice so the command is reparented to init and never left as a zombie
+	child = fork();
+	if (child == 0) {
+		if (fork() == 0) {
+			int devnull = open("/dev/null", O_WRONLY);
+			if (devnull != -1)
+				dup2(devnull, STDOUT_FILENO);
+			setenv("BLOCK_BUTTON", btn, 1);
+			setsid();
+			execl("/bin/sh", "sh", "-c", shcmd, (char *)NULL);
+			_exit(127);
+		}
+		_exit(0);
+	}
+	if (child > 0)
+		waitpid(child, NULL, 0);
 }
 
 void getsigcmds(unsigned int signal)
@@ -118,9 +159,11 @@ void setupsignals(void)
         signal(i, dummysighandler);
 #endif
 
+	struct sigaction sa = { .sa_sigaction = sighandler, .sa_flags = SA_SIGINFO | SA_RESTART };
+	sigemptyset(&sa.sa_mask);
 	for (unsigned int i = 0; i < LENGTH(blocks); i++) {
 		if (blocks[i].signal > 0)
-			signal(SIGMINUS+blocks[i].signal, sighandler);
+			sigaction(SIGMINUS+blocks[i].signal, &sa, NULL);
 	}
 
 }
@@ -171,7 +214,8 @@ void statusloop(void)
 {
 	struct pollfd pfd = { .fd = sigpipe[0], .events = POLLIN };
 	struct timespec now, next;
-	int i = 0, sig, timeout;
+	int i = 0, timeout;
+	SigEvent ev;
 
 	getcmds(-1);
 	writestatus();
@@ -182,8 +226,14 @@ void statusloop(void)
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		timeout = (next.tv_sec - now.tv_sec) * 1000 + (next.tv_nsec - now.tv_nsec) / 1000000;
 		if (timeout > 0 && poll(&pfd, 1, timeout) != 0) {
-			while (read(sigpipe[0], &sig, sizeof(sig)) == sizeof(sig))
-				getsigcmds(sig);
+			while (read(sigpipe[0], &ev, sizeof(ev)) == sizeof(ev)) {
+				if (ev.button) {
+					for (unsigned int j = 0; j < LENGTH(blocks); j++)
+						if (blocks[j].signal == ev.signal)
+							buttonhandler(blocks + j, ev.button);
+				} else
+					getsigcmds(ev.signal);
+			}
 			writestatus();
 			continue;
 		}
@@ -202,11 +252,13 @@ void dummysighandler(int signum)
 }
 #endif
 
-void sighandler(int signum)
+void sighandler(int signum, siginfo_t *si, void *ucontext)
 {
-	//running the commands here isn't async-signal-safe, so just queue the signal
-	int olderrno = errno, sig = signum-SIGPLUS;
-	write(sigpipe[1], &sig, sizeof(sig));
+	//running the commands here isn't async-signal-safe, so just queue the signal.
+	//dwm sends the clicked mouse button with sigqueue, a plain kill means update.
+	int olderrno = errno;
+	SigEvent ev = { signum-SIGPLUS, si->si_code == SI_QUEUE ? si->si_value.sival_int : 0 };
+	write(sigpipe[1], &ev, sizeof(ev));
 	errno = olderrno;
 }
 
