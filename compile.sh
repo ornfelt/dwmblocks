@@ -44,7 +44,9 @@ if ! $battery_present; then
 fi
 
 # Compile
-sudo make clean install
+make clean
+make
+sudo make install
 
 echo "Script execution completed."
 
