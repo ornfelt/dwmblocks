@@ -65,16 +65,12 @@ void getcmd(const Block *block, char *output)
 	int i = strlen(block->icon);
 	fgets(tempstatus+i, CMDLENGTH-i-delimLen, cmdf);
 	i = strlen(tempstatus);
+	//only chop off newline if one is present at the end
+	if (i != 0 && tempstatus[i-1] == '\n')
+		tempstatus[--i] = '\0';
 	//if block and command output are both not empty
-	if (i != 0) {
-		//only chop off newline if one is present at the end
-		i = tempstatus[i-1] == '\n' ? i-1 : i;
-		if (delim[0] != '\0') {
-			strncpy(tempstatus+i, delim, delimLen);
-		}
-		else
-			tempstatus[i++] = '\0';
-	}
+	if (i != 0 && delim[0] != '\0')
+		strncpy(tempstatus+i, delim, delimLen);
 	strcpy(output, tempstatus);
 	pclose(cmdf);
 }
@@ -120,7 +116,8 @@ int getstatus(char *str, char *last)
 	str[0] = '\0';
 	for (unsigned int i = 0; i < LENGTH(blocks); i++)
 		strcat(str, statusbar[i]);
-	str[strlen(str)-strlen(delim)] = '\0';
+	if (strlen(str) >= strlen(delim))
+		str[strlen(str)-strlen(delim)] = '\0';
 	return strcmp(str, last);//0 if they are the same
 }
 
