@@ -1,6 +1,6 @@
 diff --git a/.claude/skills/dwmblocks-upstream-sync/SKILL.md b/.claude/skills/dwmblocks-upstream-sync/SKILL.md
 new file mode 100644
-index 0000000..b670e28
+index 0000000..31cb691
 --- /dev/null
 +++ b/.claude/skills/dwmblocks-upstream-sync/SKILL.md
 @@ -0,0 +1,128 @@
@@ -114,8 +114,8 @@ index 0000000..b670e28
 +
 +## Verification
 +
-+Build with the `Makefile` (`compile.sh` wraps it in `sudo make clean install`). The existing binary is owned by root (from
-+`sudo make clean install` via `compile.sh`), so do not build in place - build a throwaway copy:
++Build with the `Makefile` (`compile.sh` runs `make clean`, `make` and `sudo make install`). Do not build in place, since
++that would replace the user's built binary - build a throwaway copy:
 +
 +```bash
 +TMP=$(mktemp -d) && git ls-files -z | xargs -0 cp --parents -t "$TMP" && cp blocks.h "$TMP"/
@@ -124,7 +124,7 @@ index 0000000..b670e28
 +```
 +
 +The build must pass with no new warnings from the changed code. Do not run `make install` or `./compile.sh`
-+(it runs `sudo make clean install`); that is the user's call.
++(it runs `sudo make install`); that is the user's call.
 +
 +## Report
 +
@@ -160,10 +160,10 @@ index dbb3305..f6561a0 100644
  static unsigned int delimLen = 5;
 diff --git a/compile.sh b/compile.sh
 new file mode 100755
-index 0000000..9868d89
+index 0000000..0061951
 --- /dev/null
 +++ b/compile.sh
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,52 @@
 +#!/usr/bin/env bash
 +set -euo pipefail
 +
@@ -210,12 +210,14 @@ index 0000000..9868d89
 +fi
 +
 +# Compile
-+sudo make clean install
++make clean
++make
++sudo make install
 +
 +echo "Script execution completed."
 +
 diff --git a/dwmblocks.c b/dwmblocks.c
-index c8f77b7..269acde 100644
+index c8f77b7..17c87dd 100644
 --- a/dwmblocks.c
 +++ b/dwmblocks.c
 @@ -1,8 +1,13 @@
@@ -283,7 +285,7 @@ index c8f77b7..269acde 100644
  #endif
  
  
-@@ -52,31 +61,33 @@ static void (*writestatus) () = pstdout;
+@@ -52,31 +61,44 @@ static void (*writestatus) () = pstdout;
  
  static char statusbar[LENGTH(blocks)][CMDLENGTH] = {0};
  static char statusstr[2][STATUSLENGTH];
@@ -291,6 +293,7 @@ index c8f77b7..269acde 100644
 -static int returnStatus = 0;
 +static volatile sig_atomic_t statusContinue = 1;
 +static int sigpipe[2];
++static char *delimiter = delim;//delim from blocks.h, or the -d argument
  
  //opens process *cmd and stores output in *output
  void getcmd(const Block *block, char *output)
@@ -319,19 +322,28 @@ index c8f77b7..269acde 100644
 -		}
 -		else
 -			tempstatus[i++] = '\0';
--	}
 +	//only chop off newline if one is present at the end
 +	if (i != 0 && tempstatus[i-1] == '\n')
 +		tempstatus[--i] = '\0';
++	//drop a UTF-8 character that was cut in half because the output was too long
++	int j = i;
++	while (j > start && ((unsigned char)tempstatus[j-1] & 0xC0) == 0x80)
++		j--;
++	if (j > start) {
++		unsigned char lead = tempstatus[j-1];
++		int charlen = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
++		if (i-(j-1) < charlen)
++			tempstatus[i = j-1] = '\0';
+ 	}
 +	//leave the block out if block and command output are both empty
 +	if (i == start)
 +		tempstatus[0] = '\0';
-+	else if (delim[0] != '\0')
-+		strncpy(tempstatus+i, delim, delimLen);
++	else if (delimiter[0] != '\0')
++		strncpy(tempstatus+i, delimiter, delimLen);
  	strcpy(output, tempstatus);
  	pclose(cmdf);
  }
-@@ -91,6 +102,35 @@ void getcmds(int time)
+@@ -91,6 +113,35 @@ void getcmds(int time)
  	}
  }
  
@@ -367,7 +379,7 @@ index c8f77b7..269acde 100644
  void getsigcmds(unsigned int signal)
  {
  	const Block *current;
-@@ -101,17 +141,29 @@ void getsigcmds(unsigned int signal)
+@@ -101,17 +152,29 @@ void getsigcmds(unsigned int signal)
  	}
  }
  
@@ -399,13 +411,13 @@ index c8f77b7..269acde 100644
  	}
  
  }
-@@ -122,12 +174,13 @@ int getstatus(char *str, char *last)
+@@ -122,12 +185,13 @@ int getstatus(char *str, char *last)
  	str[0] = '\0';
  	for (unsigned int i = 0; i < LENGTH(blocks); i++)
  		strcat(str, statusbar[i]);
 -	str[strlen(str)-strlen(delim)] = '\0';
-+	if (strlen(str) >= strlen(delim))
-+		str[strlen(str)-strlen(delim)] = '\0';
++	if (strlen(str) >= strlen(delimiter))
++		str[strlen(str)-strlen(delimiter)] = '\0';
  	return strcmp(str, last);//0 if they are the same
  }
  
@@ -415,7 +427,7 @@ index c8f77b7..269acde 100644
  {
  	if (!getstatus(statusstr[0], statusstr[1]))//Only set root if text has changed.
  		return;
-@@ -135,7 +188,7 @@ void setroot()
+@@ -135,7 +199,7 @@ void setroot()
  	XFlush(dpy);
  }
  
@@ -424,7 +436,7 @@ index c8f77b7..269acde 100644
  {
  	dpy = XOpenDisplay(NULL);
  	if (!dpy) {
-@@ -148,7 +201,7 @@ int setupX()
+@@ -148,7 +212,7 @@ int setupX()
  }
  #endif
  
@@ -433,7 +445,7 @@ index c8f77b7..269acde 100644
  {
  	if (!getstatus(statusstr[0], statusstr[1]))//Only write out if text has changed.
  		return;
-@@ -157,17 +210,37 @@ void pstdout()
+@@ -157,17 +221,37 @@ void pstdout()
  }
  
  
@@ -479,7 +491,7 @@ index c8f77b7..269acde 100644
  	}
  }
  
-@@ -179,13 +252,17 @@ void dummysighandler(int signum)
+@@ -179,22 +263,26 @@ void dummysighandler(int signum)
  }
  #endif
  
@@ -501,8 +513,26 @@ index c8f77b7..269acde 100644
  {
  	statusContinue = 0;
  }
-@@ -206,6 +283,7 @@ int main(int argc, char** argv)
- 	delim[delimLen++] = '\0';
+ 
+ int main(int argc, char** argv)
+ {
+-	for (int i = 0; i < argc; i++) {//Handle command line arguments
+-		if (!strcmp("-d",argv[i]))
+-			strncpy(delim, argv[++i], delimLen);
++	for (int i = 1; i < argc; i++) {//Handle command line arguments
++		if (!strcmp("-d",argv[i]) && i+1 < argc)
++			delimiter = argv[++i];
+ 		else if (!strcmp("-p",argv[i]))
+ 			writestatus = pstdout;
+ 	}
+@@ -202,10 +290,11 @@ int main(int argc, char** argv)
+ 	if (!setupX())
+ 		return 1;
+ #endif
+-	delimLen = MIN(delimLen, strlen(delim));
+-	delim[delimLen++] = '\0';
++	delimLen = MIN(delimLen, strlen(delimiter));
++	delimiter[delimLen++] = '\0';
  	signal(SIGTERM, termhandler);
  	signal(SIGINT, termhandler);
 +	setupsignals();
