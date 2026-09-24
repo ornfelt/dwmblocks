@@ -425,6 +425,10 @@ int main(int argc, char** argv)
 	signal(SIGINT, termhandler);
 	statusloop();
 #ifndef NO_X
+	//clear the status so dwm doesn't keep showing stale blocks (e.g. a clock that
+	//stopped), an empty status makes dwm fall back to its "dwm-<version>" text
+	if (writestatus == setroot)
+		XStoreName(dpy, root, "");
 	XCloseDisplay(dpy);
 #endif
 	return 0;
