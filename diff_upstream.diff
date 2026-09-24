@@ -232,7 +232,7 @@ index 0000000..0061951
 +echo "Script execution completed."
 +
 diff --git a/dwmblocks.c b/dwmblocks.c
-index c8f77b7..9c39a97 100644
+index c8f77b7..be9fe7d 100644
 --- a/dwmblocks.c
 +++ b/dwmblocks.c
 @@ -1,8 +1,13 @@
@@ -682,7 +682,7 @@ index c8f77b7..9c39a97 100644
  		else if (!strcmp("-p",argv[i]))
  			writestatus = pstdout;
  	}
-@@ -202,8 +418,9 @@ int main(int argc, char** argv)
+@@ -202,12 +418,17 @@ int main(int argc, char** argv)
  	if (!setupX())
  		return 1;
  #endif
@@ -694,3 +694,11 @@ index c8f77b7..9c39a97 100644
  	signal(SIGTERM, termhandler);
  	signal(SIGINT, termhandler);
  	statusloop();
+ #ifndef NO_X
++	//clear the status so dwm doesn't keep showing stale blocks (e.g. a clock that
++	//stopped), an empty status makes dwm fall back to its "dwm-<version>" text
++	if (writestatus == setroot)
++		XStoreName(dpy, root, "");
+ 	XCloseDisplay(dpy);
+ #endif
+ 	return 0;
