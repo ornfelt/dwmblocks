@@ -359,6 +359,8 @@ void statusloop(void)
 			continue;
 		if (pfds[0].revents) {
 			while (read(sigpipe[0], &ev, sizeof(ev)) == sizeof(ev)) {
+				if (!ev.signal)
+					continue;//wakeup from termhandler
 				if (ev.button) {
 					for (unsigned int j = 0; j < LENGTH(blocks); j++)
 						if (blocks[j].signal == ev.signal)
@@ -396,7 +398,12 @@ void sighandler(int signum, siginfo_t *si, void *ucontext)
 
 void termhandler(int signum)
 {
+	//also wake up statusloop, in case the signal came just before it started waiting
+	int olderrno = errno;
+	SigEvent ev = { 0, 0 };
 	statusContinue = 0;
+	write(sigpipe[1], &ev, sizeof(ev));
+	errno = olderrno;
 }
 
 int main(int argc, char** argv)
@@ -413,9 +420,9 @@ int main(int argc, char** argv)
 #endif
 	delimLen = MIN(delimLen, strlen(delimiter));
 	delimiter[delimLen++] = '\0';
+	setupsignals();
 	signal(SIGTERM, termhandler);
 	signal(SIGINT, termhandler);
-	setupsignals();
 	statusloop();
 #ifndef NO_X
 	XCloseDisplay(dpy);
