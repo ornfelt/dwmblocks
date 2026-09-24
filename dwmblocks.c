@@ -84,6 +84,16 @@ void getcmd(const Block *block, char *output)
 	//only chop off newline if one is present at the end
 	if (i != 0 && tempstatus[i-1] == '\n')
 		tempstatus[--i] = '\0';
+	//drop a UTF-8 character that was cut in half because the output was too long
+	int j = i;
+	while (j > start && ((unsigned char)tempstatus[j-1] & 0xC0) == 0x80)
+		j--;
+	if (j > start) {
+		unsigned char lead = tempstatus[j-1];
+		int charlen = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+		if (i-(j-1) < charlen)
+			tempstatus[i = j-1] = '\0';
+	}
 	//leave the block out if block and command output are both empty
 	if (i == start)
 		tempstatus[0] = '\0';
