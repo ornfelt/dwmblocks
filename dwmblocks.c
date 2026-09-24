@@ -89,8 +89,9 @@ void setblockstatus(const Block *block, char *output, const char *cmdout)
 {
 	char tempstatus[CMDLENGTH] = {0};
 	int start = 0;
-	//mark the block with its signal so dwm can tell which block was clicked
-	if (block->signal)
+	//mark the block with its signal so dwm can tell which block was clicked,
+	//not when printing to stdout (-p) where the raw bytes would end up in the output
+	if (block->signal && writestatus != pstdout)
 		tempstatus[start++] = block->signal;
 	strcpy(tempstatus+start, block->icon);
 	int i = strlen(tempstatus);
