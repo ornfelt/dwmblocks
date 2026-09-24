@@ -31,7 +31,6 @@ void sighandler(int num);
 void getcmds(int time);
 void getsigcmds(unsigned int signal);
 void setupsignals(void);
-void sighandler(int signum);
 int getstatus(char *str, char *last);
 void statusloop(void);
 void termhandler(int signum);
@@ -53,7 +52,6 @@ static void (*writestatus) (void) = pstdout;
 static char statusbar[LENGTH(blocks)][CMDLENGTH] = {0};
 static char statusstr[2][STATUSLENGTH];
 static int statusContinue = 1;
-static int returnStatus = 0;
 
 //opens process *cmd and stores output in *output
 void getcmd(const Block *block, char *output)
