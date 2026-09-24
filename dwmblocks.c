@@ -1,8 +1,12 @@
+#include<errno.h>
+#include<fcntl.h>
+#include<poll.h>
 #include<stdlib.h>
 #include<stdio.h>
 #include<string.h>
 #include<unistd.h>
 #include<signal.h>
+#include<time.h>
 #ifndef NO_X
 #include<X11/Xlib.h>
 #endif
@@ -51,7 +55,8 @@ static void (*writestatus) (void) = pstdout;
 
 static char statusbar[LENGTH(blocks)][CMDLENGTH] = {0};
 static char statusstr[2][STATUSLENGTH];
-static int statusContinue = 1;
+static volatile sig_atomic_t statusContinue = 1;
+static int sigpipe[2];
 
 //opens process *cmd and stores output in *output
 void getcmd(const Block *block, char *output)
@@ -97,6 +102,16 @@ void getsigcmds(unsigned int signal)
 
 void setupsignals(void)
 {
+	//signals are queued on a pipe and handled in statusloop
+	if (pipe(sigpipe) == -1) {
+		perror("dwmblocks: pipe");
+		exit(1);
+	}
+	for (int i = 0; i < 2; i++) {
+		fcntl(sigpipe[i], F_SETFD, FD_CLOEXEC);
+		fcntl(sigpipe[i], F_SETFL, O_NONBLOCK);
+	}
+
 #ifndef __OpenBSD__
 	    /* initialize all real time signals with dummy handler */
     for (int i = SIGRTMIN; i <= SIGRTMAX; i++)
@@ -154,15 +169,28 @@ void pstdout(void)
 
 void statusloop(void)
 {
-	setupsignals();
-	int i = 0;
+	struct pollfd pfd = { .fd = sigpipe[0], .events = POLLIN };
+	struct timespec now, next;
+	int i = 0, sig, timeout;
+
 	getcmds(-1);
-	while (1) {
-		getcmds(i++);
+	writestatus();
+	clock_gettime(CLOCK_MONOTONIC, &next);
+	next.tv_sec++;
+	while (statusContinue) {
+		//wait until the next second, handling signals as they come in
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		timeout = (next.tv_sec - now.tv_sec) * 1000 + (next.tv_nsec - now.tv_nsec) / 1000000;
+		if (timeout > 0 && poll(&pfd, 1, timeout) != 0) {
+			while (read(sigpipe[0], &sig, sizeof(sig)) == sizeof(sig))
+				getsigcmds(sig);
+			writestatus();
+			continue;
+		}
+		getcmds(++i);
 		writestatus();
-		if (!statusContinue)
-			break;
-		sleep(1.0);
+		clock_gettime(CLOCK_MONOTONIC, &next);
+		next.tv_sec++;
 	}
 }
 
@@ -176,8 +204,10 @@ void dummysighandler(int signum)
 
 void sighandler(int signum)
 {
-	getsigcmds(signum-SIGPLUS);
-	writestatus();
+	//running the commands here isn't async-signal-safe, so just queue the signal
+	int olderrno = errno, sig = signum-SIGPLUS;
+	write(sigpipe[1], &sig, sizeof(sig));
+	errno = olderrno;
 }
 
 void termhandler(int signum)
@@ -201,6 +231,7 @@ int main(int argc, char** argv)
 	delim[delimLen++] = '\0';
 	signal(SIGTERM, termhandler);
 	signal(SIGINT, termhandler);
+	setupsignals();
 	statusloop();
 #ifndef NO_X
 	XCloseDisplay(dpy);
